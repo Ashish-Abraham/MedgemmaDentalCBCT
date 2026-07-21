@@ -1,6 +1,7 @@
 import os
 import json
 import ast
+import argparse
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import KFold, train_test_split
@@ -68,8 +69,23 @@ def create_assistant_response(row):
     return json.dumps(record, ensure_ascii=False)
 
 def main():
-    csv_path = "/content/MedgemmaDentalCBCT/mmdental_cleaned_full.csv"
-    output_dir = "data"
+    parser = argparse.ArgumentParser(description="Prepare dataset for MedGemma LoRA Training")
+    parser.add_argument(
+        "--csv_path", 
+        type=str, 
+        default="/content/MedgemmaDentalCBCT/mmdental_cleaned_full.csv", 
+        help="Path to the cleaned dataset file"
+    )
+    parser.add_argument(
+        "--output_dir", 
+        type=str, 
+        default="data", 
+        help="Directory to save the generated JSONL files"
+    )
+    args = parser.parse_args()
+    
+    csv_path = args.csv_path
+    output_dir = args.output_dir
     
     print(f"Loading data from {csv_path}...")
     df = pd.read_excel(csv_path)
