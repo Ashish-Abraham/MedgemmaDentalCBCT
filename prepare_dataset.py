@@ -102,8 +102,7 @@ def main():
     dataset_items = np.array(dataset_items)
     
     # 1. Generate Full Train/Val Split (90/10)
-    print("\nCreating full train/val split (90/10)...")
-    train_full, val_full = train_test_split(dataset_items, test_size=0.1, random_state=42)
+    train_full, val_full = train_test_split(dataset_items, test_size=args.split, random_state=42)
     
     with open(os.path.join(args.output_dir, "train_full.jsonl"), "w", encoding="utf-8") as f:
         for item in train_full:
