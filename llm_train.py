@@ -247,7 +247,7 @@ def main():
 
     sft_config = SFTConfig(
         output_dir=output_dir,
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_seq_length,          
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -268,7 +268,8 @@ def main():
         report_to="none",
         packing=False,
         seed=args.seed,
-        completion_only_loss=True,    # <--- Replaces the old DataCollatorForCompletionOnlyLM
+        completion_only_loss=True,  
+        loss_type="nll",  # <--- ADD THIS LINE TO DISABLE CHUNKED CROSS-ENTROPY
     )
 
     early_stopping_callback = EarlyStoppingCallback(
