@@ -31,6 +31,7 @@ import json
 import argparse
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
@@ -38,7 +39,7 @@ from transformers import (
     EarlyStoppingCallback,
 )
 from peft import LoraConfig, get_peft_model
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer, SFTConfig
 
 
 # --------------------------------------------------------------------------- #
@@ -60,8 +61,8 @@ def parse_args():
     p.add_argument("--lora_alpha", type=int, default=128)
     p.add_argument("--lora_dropout", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--fold", type=int, default=0,
-                    help="Fold index, only used for logging/output-dir naming under k-fold CV.")
+    p.add_argument("--fold", type=int, default=0, help="Fold index, only used for logging/output-dir naming.")
+    p.add_argument("--early_stopping_patience", type=int, default=3, help="Stop training if eval_loss doesn't improve for N epochs.")
     return p.parse_args()
 
 
@@ -115,9 +116,7 @@ REQUIRED_FIELDS = [
 
 
 def validate_example(example):
-    """Sanity-check that the assistant turn is valid JSON with all 7 keys.
-    Raises with the case_id so a bad prepare_dataset.py output fails loudly
-    instead of silently training on malformed targets."""
+    """Sanity-check that the assistant turn is valid JSON with all 7 keys."""
     assistant_msg = example["messages"][-1]
     assert assistant_msg["role"] == "assistant", (
         f"case_id={example.get('case_id')}: last message must be the assistant turn"
@@ -149,17 +148,73 @@ def load_and_validate(train_file, val_file):
 
 
 # --------------------------------------------------------------------------- #
-# Formatting function: messages -> single training string via chat template
+# Preprocessing for modern TRL
 # --------------------------------------------------------------------------- #
-def make_formatting_func(tokenizer):
-    def formatting_func(example):
-        text = tokenizer.apply_chat_template(
-            example["messages"],
-            tokenize=False,
-            add_generation_prompt=False,  # full conversation, incl. assistant turn, for training
-        )
-        return text
-    return formatting_func
+def convert_to_prompt_completion(example, tokenizer):
+    """
+    Modern TRL (>=0.12) relies on 'prompt' and 'completion' columns and uses 
+    `completion_only_loss=True` in SFTConfig. 
+    This natively handles the loss masking without a custom DataCollator.
+    """
+    messages = example["messages"]
+    prompt_msgs = messages[:-1]
+    
+    # Render the input prompt (System + User), leaving the generation turn active
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_msgs, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+    
+    # Render the entire conversation
+    full_text = tokenizer.apply_chat_template(
+        messages, 
+        tokenize=False, 
+        add_generation_prompt=False
+    )
+    
+    # Safely slice the completion text from the full string so loss is isolated perfectly
+    if full_text.startswith(prompt_text):
+        completion_text = full_text[len(prompt_text):]
+    else:
+        # Fallback if there is a highly unusual template mismatch
+        completion_text = messages[-1]["content"] + tokenizer.eos_token
+        
+    return {"prompt": prompt_text, "completion": completion_text}
+
+
+# --------------------------------------------------------------------------- #
+# Plotting function
+# --------------------------------------------------------------------------- #
+def plot_loss(log_history, output_dir, fold):
+    """Extracts loss history from trainer and saves a plot."""
+    train_epochs, train_losses = [], []
+    eval_epochs, eval_losses = [], []
+
+    for log in log_history:
+        if "loss" in log and "epoch" in log:
+            train_epochs.append(log["epoch"])
+            train_losses.append(log["loss"])
+        elif "eval_loss" in log and "epoch" in log:
+            eval_epochs.append(log["epoch"])
+            eval_losses.append(log["eval_loss"])
+
+    plt.figure(figsize=(10, 6))
+    if train_losses:
+        plt.plot(train_epochs, train_losses, label="Training Loss", color="blue", alpha=0.6)
+    if eval_losses:
+        plt.plot(eval_epochs, eval_losses, label="Validation Loss", color="red", marker="o", linewidth=2)
+    
+    plt.title(f"Training and Validation Loss (Fold {fold})")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.7)
+
+    plot_path = os.path.join(output_dir, "loss_curve.png")
+    plt.savefig(plot_path)
+    plt.close()
+    print(f"Saved loss graph to {plot_path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -183,30 +238,12 @@ def main():
     print(f"Loading dataset:\n  train={train_file}\n  val={val_file}")
     train_ds, val_ds = load_and_validate(train_file, val_file)
 
-    formatting_func = make_formatting_func(tokenizer)
-
-    # Only compute loss on the assistant's response tokens, not the (long)
-    # system/user prompt containing demographics and clinical findings.
-    # response_template must match how the chat template renders the start
-    # of the assistant turn for this tokenizer/model family — verify against
-    # a decoded sample before a long training run (see the printed check below).
-    response_template = "<start_of_turn>model\n"
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template,
-        tokenizer=tokenizer,
-    )
-
-    # Quick sanity print: confirm the response_template actually appears in
-    # a rendered example, otherwise the collator will silently mask nothing
-    # (== training on the full prompt, which you don't want).
-    sample_text = formatting_func(train_ds[0])
-    if response_template not in sample_text:
-        raise ValueError(
-            "response_template not found in a rendered training example — "
-            "check MedGemma's chat template turn markers and update "
-            "response_template accordingly before training.\n\n"
-            f"Rendered sample:\n{sample_text[:2000]}"
-        )
+    # Convert the "messages" format into explicit "prompt" and "completion"
+    # columns. We remove the original "messages" column so TRL handles it purely
+    # as a prompt-completion dataset.
+    print("Formatting dataset into prompt/completion pairs...")
+    train_ds = train_ds.map(lambda x: convert_to_prompt_completion(x, tokenizer), remove_columns=["messages", "case_id"])
+    val_ds = val_ds.map(lambda x: convert_to_prompt_completion(x, tokenizer), remove_columns=["messages", "case_id"])
 
     sft_config = SFTConfig(
         output_dir=output_dir,
@@ -222,15 +259,21 @@ def main():
         logging_steps=5,
         eval_strategy="epoch",
         save_strategy="epoch",
-        save_total_limit=2,
-        load_best_model_at_end=True,
+        save_total_limit=1,           
+        load_best_model_at_end=True,  
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         bf16=True,
-        optim="adamw_torch",        # Standard fast optimizer for high-end GPUs
+        optim="adamw_torch",
         report_to="none",
-        packing=False,               # keep each case as its own example, no cross-case packing
+        packing=False,
         seed=args.seed,
+        completion_only_loss=True,    # <--- Replaces the old DataCollatorForCompletionOnlyLM
+    )
+
+    early_stopping_callback = EarlyStoppingCallback(
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_threshold=0.0
     )
 
     trainer = SFTTrainer(
@@ -238,22 +281,21 @@ def main():
         args=sft_config,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        formatting_func=formatting_func,
-        data_collator=collator,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+        callbacks=[early_stopping_callback],
     )
 
     trainer.train()
 
-    print(f"Saving LoRA adapter to {output_dir}")
+    plot_loss(trainer.state.log_history, output_dir, args.fold)
+
+    print(f"Saving BEST LoRA adapter to {output_dir}")
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
 
-    # Final eval loss for this fold, useful when averaging across k-fold CV runs
     metrics = trainer.evaluate()
     with open(os.path.join(output_dir, "final_eval_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
-    print(f"Fold {args.fold} final eval metrics: {metrics}")
+    print(f"Fold {args.fold} best eval metrics: {metrics}")
 
 
 if __name__ == "__main__":
