@@ -50,20 +50,20 @@ def create_user_prompt(row):
     return prompt
 
 def create_assistant_response(row):
-    """Constructs the assistant response as a valid JSON string containing the 7 fields."""
     record = {
-        "Main appeal": str(row.get("Main appeal", "")),
-        "Present medical history": str(row.get("Present medical history", "")),
-        "Oral Check": str(row.get("Oral Check", "")),
-        "Diagnosis": str(row.get("Diagnosis", "")),
-        "Treatment plan": str(row.get("Treatment plan", "")),
-        "Handle": str(row.get("Handle", "")),
-        "Doctor advices": str(row.get("Doctor advices", ""))
+        "Main appeal": str(row.get("Main appeal", "")).strip(),
+        "Present medical history": str(row.get("Present medical history", "")).strip(),
+        "Oral Check": str(row.get("Oral Check", "")).strip(),
+        "Diagnosis": str(row.get("Diagnosis", "")).strip(),
+        "Treatment plan": str(row.get("Treatment plan", "")).strip(),
+        "Handle": str(row.get("Handle", "")).strip(),
+        "Doctor advices": str(row.get("Doctor advices", "")).strip()
     }
-    # Ensure missing float/NaNs are converted to empty strings in the json
+    
+    # Replace nan or empty strings with "Not recorded"
     for k, v in record.items():
-        if v == "nan":
-            record[k] = ""
+        if v.lower() == "nan" or not v:
+            record[k] = "Not recorded"
             
     return json.dumps(record, ensure_ascii=False)
 
