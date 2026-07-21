@@ -3,27 +3,6 @@ train_medgemma_lora.py
 
 QLoRA fine-tuning of google/medgemma-27b-it for the MMDental multimodal
 clinical-record generation task (MICCAI STSR 2026, Task 3).
-
-ASSUMPTIONS (produced by prepare_dataset.py, not this file):
-  - train.jsonl and val.jsonl exist, one JSON object per line, each with a
-    "messages" key in HF chat format:
-
-      {
-        "case_id": "1",
-        "messages": [
-          {"role": "system", "content": "..."},
-          {"role": "user", "content": "..."},          # Clean prompt (demographics + findings, NO RAG)
-          {"role": "assistant", "content": "{...7-field JSON...}"}
-        ]
-      }
-
-  - The assistant turn is a single JSON string with exactly these keys:
-      Main appeal, Present medical history, Oral Check, Diagnosis,
-      Treatment plan, Handle, Doctor advices
-
-Hardware target: High-VRAM GPU (e.g. A100 80GB) for training to maximize score.
-(The 24GB RTX 3090 constraint is for Docker deployment only).
-Training uses pure bfloat16 (no 4-bit quantization), high-rank LoRA, and larger batch sizes.
 """
 
 import os
@@ -60,6 +39,12 @@ def parse_args():
     p.add_argument("--lora_r", type=int, default=64)
     p.add_argument("--lora_alpha", type=int, default=128)
     p.add_argument("--lora_dropout", type=float, default=0.05)
+    
+    # NEW ARGUMENT: Space-separated list of target modules
+    p.add_argument("--lora_target_modules", nargs="+", 
+                   default=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                   help="List of modules to target with LoRA (e.g., --lora_target_modules q_proj v_proj)")
+                   
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fold", type=int, default=0, help="Fold index, only used for logging/output-dir naming.")
     p.add_argument("--early_stopping_patience", type=int, default=3, help="Stop training if eval_loss doesn't improve for N epochs.")
@@ -89,17 +74,14 @@ def load_model_and_tokenizer(model_name: str):
 # --------------------------------------------------------------------------- #
 # LoRA config
 # --------------------------------------------------------------------------- #
-def build_lora_model(model, r, alpha, dropout):
+def build_lora_model(model, r, alpha, dropout, target_modules):
     lora_config = LoraConfig(
         r=r,
         lora_alpha=alpha,
         lora_dropout=dropout,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
+        target_modules=target_modules,  # Updated to use the variable
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
@@ -230,7 +212,9 @@ def main():
 
     print(f"Loading base model: {args.model_name}")
     model, tokenizer = load_model_and_tokenizer(args.model_name)
-    model = build_lora_model(model, args.lora_r, args.lora_alpha, args.lora_dropout)
+    
+    # Pass the target_modules argument here
+    model = build_lora_model(model, args.lora_r, args.lora_alpha, args.lora_dropout, args.lora_target_modules)
 
     train_file = args.train_file or f"data/train_fold{args.fold}.jsonl"
     val_file = args.val_file or f"data/val_fold{args.fold}.jsonl"
@@ -238,9 +222,6 @@ def main():
     print(f"Loading dataset:\n  train={train_file}\n  val={val_file}")
     train_ds, val_ds = load_and_validate(train_file, val_file)
 
-    # Convert the "messages" format into explicit "prompt" and "completion"
-    # columns. We remove the original "messages" column so TRL handles it purely
-    # as a prompt-completion dataset.
     print("Formatting dataset into prompt/completion pairs...")
     train_ds = train_ds.map(lambda x: convert_to_prompt_completion(x, tokenizer), remove_columns=["messages", "case_id"])
     val_ds = val_ds.map(lambda x: convert_to_prompt_completion(x, tokenizer), remove_columns=["messages", "case_id"])
@@ -269,7 +250,7 @@ def main():
         packing=False,
         seed=args.seed,
         completion_only_loss=True,  
-        loss_type="nll",  # <--- ADD THIS LINE TO DISABLE CHUNKED CROSS-ENTROPY
+        loss_type="nll", 
     )
 
     early_stopping_callback = EarlyStoppingCallback(
