@@ -3,7 +3,7 @@ import json
 import ast
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 
 def parse_categories(cat_str):
     """Parse string representations of lists like "['Impacted Tooth', 'Pulpitis']" into comma-separated strings."""
@@ -68,7 +68,7 @@ def create_assistant_response(row):
     return json.dumps(record, ensure_ascii=False)
 
 def main():
-    csv_path = "mmdental_cleaned_full.csv"
+    csv_path = "/content/MedgemmaDentalCBCT/mmdental_cleaned_full.csv"
     output_dir = "data"
     
     print(f"Loading data from {csv_path}...")
@@ -102,10 +102,29 @@ def main():
         
     dataset_items = np.array(dataset_items)
     
+    # ---------------------------------------------------------
+    # 1. Generate Full Train/Val Split (80/20)
+    # ---------------------------------------------------------
+    print("\nCreating full train/val split (80/20)...")
+    train_full, val_full = train_test_split(dataset_items, test_size=0.2, random_state=42)
+    
+    with open(os.path.join(output_dir, "train_full.jsonl"), "w", encoding="utf-8") as f:
+        for item in train_full:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            
+    with open(os.path.join(output_dir, "val_full.jsonl"), "w", encoding="utf-8") as f:
+        for item in val_full:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            
+    print(f"Saved full split: {len(train_full)} train, {len(val_full)} val samples.")
+    
+    # ---------------------------------------------------------
+    # 2. Generate K-Fold Splits
+    # ---------------------------------------------------------
     n_splits = 5
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
     
-    print(f"Splitting into {n_splits} folds...")
+    print(f"\nSplitting into {n_splits} folds...")
     for fold, (train_idx, val_idx) in enumerate(kf.split(dataset_items)):
         train_items = dataset_items[train_idx]
         val_items = dataset_items[val_idx]
