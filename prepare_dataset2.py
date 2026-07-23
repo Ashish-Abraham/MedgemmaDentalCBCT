@@ -82,6 +82,12 @@ def main():
         default="data", 
         help="Directory to save the generated JSONL files"
     )
+    parser.add_argument(
+        "--split", 
+        type=float, 
+        default=0.1, 
+        help="Dsata Split"
+    )
     args = parser.parse_args()
     
     csv_path = args.csv_path
@@ -125,8 +131,8 @@ def main():
     # ---------------------------------------------------------
     # 1. Generate Full Train/Val Split (80/20)
     # ---------------------------------------------------------
-    print("\nCreating full train/val split (80/20)...")
-    train_full, val_full = train_test_split(dataset_items, test_size=0.2, random_state=42)
+    print("\nCreating full train/val split...")
+    train_full, val_full = train_test_split(dataset_items, test_size=args.split, random_state=42)
     
     with open(os.path.join(output_dir, "train_full.jsonl"), "w", encoding="utf-8") as f:
         for item in train_full:
