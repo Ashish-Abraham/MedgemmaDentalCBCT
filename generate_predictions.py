@@ -77,7 +77,7 @@ SYSTEM_PROMPT = (
     "'Not recorded' if every retrieved case also leaves that field empty or absent.\n"
     "6. Strict Length Constraint: Keep every field extremely brief and concise, consisting "
     "of only a single short sentence or phrase (roughly 5-15 words). Mimic the length "
-    "and formatting of this example:\n"
+    "and formatting of this example but do not miss major keywords and detail:\n"
     "   \"Main appeal\": \"Pain in lower left molar for three days.\",\n"
     "   \"Present medical history\": \"Spontaneous pain and sensitivity to cold.\",\n"
     "   \"Oral Check\": \"Tooth #36 caries with percussion tenderness.\",\n"
