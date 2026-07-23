@@ -170,6 +170,7 @@ def generate_record(model, tokenizer, case, max_exemplars, max_new_tokens=700):
     raw_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
     record = extract_json(raw_text)
+    print(f"--- case {case.get('case_id')} raw LLM output ---\n{raw_text}\n")   # add this line
     record = apply_fallbacks(record, case)
     return {field: record[field] for field in REQUIRED_FIELDS}
 
