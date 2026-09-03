@@ -348,22 +348,34 @@ def main():
         if i % 10 == 0 or i == len(case_ids):
             print(f"  Processed {i}/{len(case_ids)} cases...")
 
-    with open(args.output_json, "w", encoding="utf-8") as f:
-        json.dump(predictions, f, ensure_ascii=False, indent=2)
+    import pandas as pd
+    
+    # Format predictions into strings and prepare rows for Excel
+    excel_rows = []
+    for case_id, record in predictions.items():
+        report_text = "\n".join([f"{k}: {v}" for k, v in record.items()])
+        excel_rows.append({
+            "Case ID": case_id,
+            "LLM-Generated Report": report_text
+        })
+        
+    output_xlsx = args.output_json.replace(".json", ".xlsx")
+    pd.DataFrame(excel_rows).to_excel(output_xlsx, index=False)
 
+    # Write status tracking CSV
     with open(args.status_csv, "w", encoding="utf-8") as f:
         f.write("Case ID,generation_status\n")
         for row in status_rows:
             f.write(f"{row['Case ID']},{row['generation_status']}\n")
 
-    print(f"\nWrote {args.output_json} with {len(predictions)} cases.")
+    print(f"\nWrote {output_xlsx} with {len(predictions)} cases.")
     print(f"Generation status: {status_counts['model']} model, "
           f"{status_counts['model_after_retry']} model_after_retry, "
           f"{status_counts['fallback']} fallback.")
-    print(f"Per-case breakdown saved to {args.status_csv} — check this before trusting "
-          f"any downstream metrics; fallback/retry rows are not genuine model generations.")
-
-    package_zip(args.output_json, args.output_zip)
+    print(f"Per-case breakdown saved to {args.status_csv} — check this before trusting metrics.")
+    
+    # Commented out zip packaging since output is now an Excel file
+    # package_zip(args.output_json, args.output_zip)
 
 
 if __name__ == "__main__":
