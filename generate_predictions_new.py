@@ -78,10 +78,8 @@ SYSTEM_PROMPT = (
     "your own phrasing.\n"
     "- Every field must contain real clinical content. Only write 'Not recorded' if "
     "no retrieved case offers any relevant evidence for that field.\n\n"
-    # "LENGTH: each field is one short clinical fragment, roughly 5-20 words. Do not pad, "
-    # "but do not omit tooth numbers, codes, or key clinical terms.\n\n"
     "LENGTH: Keep each field concise and telegraphic. If multiple teeth or conditions are "
-    "involved, you must describe all relevant findings to ensure a complete record, but do not " 
+    "involved, you must describe all relevant findings to ensure a complete record, but do not "
     "pad with unnecessary conversational text. "
     "OUTPUT FORMAT: output ONLY a single JSON object with exactly these 5 keys, in this "
     "order: Oral Check, Diagnosis, Treatment plan, Handle, Doctor advices. No markdown, "
@@ -227,14 +225,16 @@ def apply_fallbacks(record, case):
     return record
 
 
-def load_model(base_model_name, lora_adapter_path):
-    tokenizer = AutoTokenizer.from_pretrained(lora_adapter_path)
+def load_model(base_model_name, lora_adapter_path=None):
+    load_path = lora_adapter_path if lora_adapter_path else base_model_name
+    tokenizer = AutoTokenizer.from_pretrained(load_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_name, device_map="auto", torch_dtype=torch.bfloat16,
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_name, device_map="auto", torch_dtype=torch.bfloat16
     )
-    model = PeftModel.from_pretrained(base_model, lora_adapter_path)
+    if lora_adapter_path:
+        model = PeftModel.from_pretrained(model, lora_adapter_path)
     model.eval()
     return model, tokenizer
 
@@ -270,7 +270,7 @@ def generate_record(model, tokenizer, case, max_exemplars, max_new_tokens=400, c
     exemplars = case.get("retrieved_exemplars", [])
 
     raw_text = _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens,
-                                correction=False, sample=False)
+                               correction=False, sample=False)
     record = extract_json(raw_text)
     parsed_ok = bool(record) and any(str(record.get(f, "")).strip() for f in TARGET_FIELDS)
 
@@ -280,7 +280,7 @@ def generate_record(model, tokenizer, case, max_exemplars, max_new_tokens=400, c
 
     # Retry once: corrective note + sampling, to break out of verbatim copying.
     raw_text_retry = _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens,
-                                      correction=True, sample=True)
+                                     correction=True, sample=True)
     record_retry = extract_json(raw_text_retry)
     parsed_ok_retry = bool(record_retry) and any(str(record_retry.get(f, "")).strip() for f in TARGET_FIELDS)
 
@@ -302,8 +302,8 @@ def package_zip(predictions_path, zip_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rag_json", type=str, required=True)
-    parser.add_argument("--base_model", type=str, default="google/medgemma-27b-it")
-    parser.add_argument("--lora_adapter", type=str, required=False)
+    parser.add_argument("--base_model", type=str, default="google/medgemma-1.5-4b-it")
+    parser.add_argument("--lora_adapter", type=str, required=False, default=None)
     parser.add_argument("--output_json", type=str, default="predictions.json")
     parser.add_argument("--output_zip", type=str, default="submission.zip")
     parser.add_argument("--status_csv", type=str, default="generation_status.csv")
@@ -348,34 +348,22 @@ def main():
         if i % 10 == 0 or i == len(case_ids):
             print(f"  Processed {i}/{len(case_ids)} cases...")
 
-    import pandas as pd
-    
-    # Format predictions into strings and prepare rows for Excel
-    excel_rows = []
-    for case_id, record in predictions.items():
-        report_text = "\n".join([f"{k}: {v}" for k, v in record.items()])
-        excel_rows.append({
-            "Case ID": case_id,
-            "LLM-Generated Report": report_text
-        })
-        
-    output_xlsx = args.output_json.replace(".json", ".xlsx")
-    pd.DataFrame(excel_rows).to_excel(output_xlsx, index=False)
+    with open(args.output_json, "w", encoding="utf-8") as f:
+        json.dump(predictions, f, ensure_ascii=False, indent=2)
 
-    # Write status tracking CSV
     with open(args.status_csv, "w", encoding="utf-8") as f:
         f.write("Case ID,generation_status\n")
         for row in status_rows:
             f.write(f"{row['Case ID']},{row['generation_status']}\n")
 
-    print(f"\nWrote {output_xlsx} with {len(predictions)} cases.")
+    print(f"\nWrote {args.output_json} with {len(predictions)} cases.")
     print(f"Generation status: {status_counts['model']} model, "
           f"{status_counts['model_after_retry']} model_after_retry, "
           f"{status_counts['fallback']} fallback.")
-    print(f"Per-case breakdown saved to {args.status_csv} — check this before trusting metrics.")
-    
-    # Commented out zip packaging since output is now an Excel file
-    # package_zip(args.output_json, args.output_zip)
+    print(f"Per-case breakdown saved to {args.status_csv} — check this before trusting "
+          f"any downstream metrics; fallback/retry rows are not genuine model generations.")
+
+    #package_zip(args.output_json, args.output_zip)
 
 
 if __name__ == "__main__":
