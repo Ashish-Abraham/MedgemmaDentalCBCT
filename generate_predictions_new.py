@@ -128,24 +128,57 @@ def format_query_context(case):
 def build_user_prompt(case, max_exemplars=5, correction=False):
     query_ctx = format_query_context(case)
 
+    drafts = case.get("draft_text", {}) or {}
+    findings = case.get("predicted_findings", {}) or {}
+
+    oral_check_draft = str(drafts.get("oral_check_draft", "")).strip() or "None"
+    diagnosis_draft = str(drafts.get("diagnosis_draft", "")).strip() or "None"
+    treatment_plan_draft = (
+        str(drafts.get("treatment_plan_draft", "")).strip() or "None"
+    )
+
+    suspected_teeth = (
+        ", ".join(findings.get("tooth_notations_expanded", []))
+        or ", ".join(findings.get("tooth_notations", []))
+        or "None"
+    )
+    detected_codes = ", ".join(findings.get("diagnosis_codes", [])) or "None"
+
     query_block = (
         "CURRENT PATIENT — this is who you are writing the assessment for:\n"
         f"  Age: {query_ctx['Age']}\n"
         f"  Sex: {query_ctx['Sex']}\n"
         f"  Main appeal: {query_ctx['Main appeal']}\n"
         f"  Present medical history: {query_ctx['Present medical history']}\n"
-        f"  Past medical history: {query_ctx['Past medical history']}"
+        f"  Past medical history: {query_ctx['Past medical history']}\n"
+        f"  Suspected Teeth / Sites: {suspected_teeth}\n"
+        f"  Draft Findings (CBCT/Exam): {oral_check_draft}\n"
+        f"  Draft Diagnosis Findings: {diagnosis_draft}\n"
+        f"  Draft Planned Actions: {treatment_plan_draft}\n"
+        f"  Detected Finding Codes: {detected_codes}"
     )
 
     exemplars = case.get("retrieved_exemplars", [])[:max_exemplars]
     ex_lines = []
     for i, ex in enumerate(exemplars):
+        if not isinstance(ex, dict):
+            continue
         label = chr(65 + i)
-        rec = ex.get("record", {})
-        field_lines = "\n".join(
-            f"  {field}: {rec.get(field, 'Not available')}" for field in TARGET_FIELDS
+        rec = ex.get("record", {}) or {}
+
+        field_lines = []
+        for field in TARGET_FIELDS:
+            val = str(rec.get(field, "Not available")).strip()
+            # Truncate overly long exemplar fields to avoid overwhelming the context
+            if len(val) > 300:
+                val = val[:300] + "..."
+            field_lines.append(f"  {field}: {val}")
+
+        joined_fields = "\n".join(field_lines)
+        ex_lines.append(
+            f"[Reference Case {label}] (similarity={ex.get('similarity', 0):.3f})\n{joined_fields}"
         )
-        ex_lines.append(f"[Reference Case {label}] (similarity={ex.get('similarity', 0):.3f})\n{field_lines}")
+
     exemplar_block = (
         "REFERENCE CASES (style/terminology guidance only — these are OTHER patients, "
         "not the one you are reporting on):\n\n" + "\n\n".join(ex_lines)
