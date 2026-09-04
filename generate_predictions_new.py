@@ -279,7 +279,7 @@ def _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens, corre
         {"role": "user", "content": build_user_prompt(case, max_exemplars, correction=correction)},
     ]
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    print(f"\n\n{prompt_text}\n\n")
+    # print(f"\n\n{prompt_text}\n\n")
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
 
     gen_kwargs = dict(
