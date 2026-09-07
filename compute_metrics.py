@@ -35,7 +35,7 @@
 #     - "Case ID"
 #     - "Ground Truth Report"      (free text, same "Field: value" format used
 #                                    in the paper's JSON report schema)
-#     - "LLM-Generated Report"     (free text, same format)
+#     - "LLM-Generated Fixed Report"     (free text, same format)
 # Optional column (needed for metrics 8 & 9):
 #     - "Retrieved Exemplars"      (a JSON string: a list of objects, each with
 #                                    "case_id", "similarity", ... and a "record"
@@ -216,7 +216,7 @@
 #     for idx, row in df.iterrows():
 #         case_id = row["Case ID"]
 #         gt_raw = row["Ground Truth Report"]
-#         gen_raw = row["LLM-Generated Report"]
+#         gen_raw = row["LLM-Generated Fixed Report"]
 
 #         gt_norm = normalize(gt_raw)
 #         gen_norm = normalize(gen_raw)
@@ -321,13 +321,13 @@
 #     per_case_df = pd.DataFrame(rows)
 
 #     # ---- Corpus-level BLEU-4 (sacrebleu, standard for report/caption generation) ----
-#     hyps = [normalize(t) for t in df["LLM-Generated Report"].tolist()]
+#     hyps = [normalize(t) for t in df["LLM-Generated Fixed Report"].tolist()]
 #     refs = [[normalize(t) for t in df["Ground Truth Report"].tolist()]]
 #     bleu4 = sacrebleu.corpus_bleu(hyps, refs).score / 100.0  # sacrebleu returns 0-100
 
 #     # also compute a per-case BLEU-4 (sentence-level, smoothed) for the per-case CSV
 #     sentence_bleu = []
-#     for hyp, ref in zip(df["LLM-Generated Report"], df["Ground Truth Report"]):
+#     for hyp, ref in zip(df["LLM-Generated Fixed Report"], df["Ground Truth Report"]):
 #         score = sacrebleu.sentence_bleu(normalize(hyp), [normalize(ref)]).score / 100.0
 #         sentence_bleu.append(score)
 #     per_case_df.insert(1, "BLEU-4", sentence_bleu)
@@ -382,7 +382,7 @@
 
 #     df = pd.read_excel(args.xlsx_path, sheet_name=args.sheet)
 
-#     required = {"Case ID", "Ground Truth Report", "LLM-Generated Report"}
+#     required = {"Case ID", "Ground Truth Report", "LLM-Generated Fixed Report"}
 #     missing = required - set(df.columns)
 #     if missing:
 #         raise ValueError(f"Input sheet is missing required column(s): {missing}")
@@ -436,7 +436,7 @@ METRICS
 
 INPUT
 -----
-.xlsx with columns: "Case ID", "Ground Truth Report", "LLM-Generated Report"
+.xlsx with columns: "Case ID", "Ground Truth Report", "LLM-Generated Fixed Report"
 Optional: "Retrieved Exemplars" (JSON list of {"record": {...}, ...})
 
 USAGE
@@ -593,7 +593,7 @@ def integrity_checks(df: pd.DataFrame, exemplar_col: str = None):
     warnings = []
 
     # 1. Exact-duplicate generated reports across different cases.
-    gen_norm = df["LLM-Generated Report"].apply(normalize)
+    gen_norm = df["LLM-Generated Fixed Report"].apply(normalize)
     dupe_mask = gen_norm.duplicated(keep=False)
     if dupe_mask.any():
         dupe_groups = df.loc[dupe_mask].groupby(gen_norm[dupe_mask]).apply(
@@ -602,7 +602,7 @@ def integrity_checks(df: pd.DataFrame, exemplar_col: str = None):
         for ids in dupe_groups:
             if len(ids) > 1:
                 warnings.append(
-                    f"[INTEGRITY] Cases {ids} have byte-identical 'LLM-Generated Report' "
+                    f"[INTEGRITY] Cases {ids} have byte-identical 'LLM-Generated Fixed Report' "
                     f"text. This almost always means generation failed for these cases and "
                     f"a fallback/default record was used instead of a real prediction. "
                     f"Metrics computed over these rows do not reflect model performance."
@@ -611,7 +611,7 @@ def integrity_checks(df: pd.DataFrame, exemplar_col: str = None):
     # 2. Verbatim (whole-record) copies of a retrieved exemplar.
     if exemplar_col is not None:
         for _, row in df.iterrows():
-            gen_norm_text = normalize(row["LLM-Generated Report"])
+            gen_norm_text = normalize(row["LLM-Generated Fixed Report"])
             exemplars = parse_exemplars(row.get(exemplar_col))
             for ex in exemplars:
                 ex_text_norm = normalize(exemplar_full_text(ex))
@@ -645,7 +645,7 @@ def compute_all_metrics(df: pd.DataFrame, exemplar_col: str = None) -> pd.DataFr
     for idx, row in df.iterrows():
         case_id = row["Case ID"]
         gt_raw = row["Ground Truth Report"]
-        gen_raw = row["LLM-Generated Report"]
+        gen_raw = row["LLM-Generated Fixed Report"]
 
         gt_norm = normalize(gt_raw)
         gen_norm = normalize(gen_raw)
@@ -732,12 +732,12 @@ def compute_all_metrics(df: pd.DataFrame, exemplar_col: str = None) -> pd.DataFr
 
     per_case_df = pd.DataFrame(rows)
 
-    hyps = [normalize(t) for t in df["LLM-Generated Report"].tolist()]
+    hyps = [normalize(t) for t in df["LLM-Generated Fixed Report"].tolist()]
     refs = [[normalize(t) for t in df["Ground Truth Report"].tolist()]]
     bleu4 = sacrebleu.corpus_bleu(hyps, refs).score / 100.0
 
     sentence_bleu = []
-    for hyp, ref in zip(df["LLM-Generated Report"], df["Ground Truth Report"]):
+    for hyp, ref in zip(df["LLM-Generated Fixed Report"], df["Ground Truth Report"]):
         score = sacrebleu.sentence_bleu(normalize(hyp), [normalize(ref)]).score / 100.0
         sentence_bleu.append(score)
     per_case_df.insert(1, "BLEU-4", sentence_bleu)
@@ -784,7 +784,7 @@ def main():
 
     df = pd.read_excel(args.xlsx_path, sheet_name=args.sheet)
 
-    required = {"Case ID", "Ground Truth Report", "LLM-Generated Report"}
+    required = {"Case ID", "Ground Truth Report", "LLM-Generated Fixed Report"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Input sheet is missing required column(s): {missing}")
