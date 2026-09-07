@@ -1,23 +1,17 @@
 """
-generate_predictions.py
+generate_predictions_new.py
 
 Runs inference with the fine-tuned MedGemma LoRA adapter over the RAG output
 JSON and writes predictions.json + submission zip.
 
 Schema: only these 5 fields are generated and scored.
 Main appeal / Present medical history are used as prompt CONTEXT ONLY.
-
-Includes a copy-detection retry: if a first-pass generation is a near-verbatim
-copy of a retrieved exemplar (the failure mode observed in practice), the
-model is re-prompted once with sampling and an explicit corrective note
-before falling back to the exemplar. A generation_status.csv sidecar records
-whether each case's output was genuinely generated, generated-after-retry,
-or a fallback copy, so evaluation sheets never silently mix the three.
 """
 
 import os
 import re
 import json
+import html
 import argparse
 import zipfile
 import traceback
@@ -98,23 +92,59 @@ def is_placeholder(value):
     return str(value).strip().lower() in ("", "not available", "unknown", "none", "n/a", "nan", "null")
 
 
+def parse_query_text(query_text):
+    """
+    Parses key-value demographic strings like:
+    'Age: 19. Sex: female. Main appeal: Crowded teeth, consultation for correction'
+    """
+    info = {"age": "unknown", "sex": "unknown", "main_appeal": "Not recorded"}
+    if not query_text:
+        return info
+
+    age_match = re.search(r"\bAge:\s*([^.\n]+)", query_text, re.IGNORECASE)
+    if age_match:
+        info["age"] = age_match.group(1).strip()
+
+    sex_match = re.search(r"\bSex:\s*([^.\n]+)", query_text, re.IGNORECASE)
+    if sex_match:
+        info["sex"] = sex_match.group(1).strip()
+
+    appeal_match = re.search(r"\bMain appeal:\s*(.+)$", query_text, re.IGNORECASE | re.DOTALL)
+    if appeal_match:
+        info["main_appeal"] = appeal_match.group(1).strip()
+
+    return info
+
+
 def format_query_context(case):
     pc = case.get("patient_context", {}) or {}
-    age = pc.get("age", "unknown")
+    
+    # Handle inputs where demographic metadata is flattened into query_text
+    query_text_info = parse_query_text(case.get("query_text", ""))
+
+    age = pc.get("age") or query_text_info["age"]
     age_group = pc.get("age_group", "")
-    sex = pc.get("sex", "unknown")
+    sex = pc.get("sex") or query_text_info["sex"]
     past_history = pc.get("past_medical_history", "Not recorded")
+
     main_appeal = (
-        case.get("main_appeal") or case.get("Main appeal")
-        or pc.get("main_appeal") or pc.get("Main appeal")
-        or case.get("chief_complaint") or pc.get("chief_complaint")
+        case.get("main_appeal")
+        or case.get("Main appeal")
+        or pc.get("main_appeal")
+        or pc.get("Main appeal")
+        or case.get("chief_complaint")
+        or pc.get("chief_complaint")
+        or (query_text_info["main_appeal"] if query_text_info["main_appeal"] != "Not recorded" else None)
         or "Not recorded"
     )
     present_history = (
-        case.get("present_medical_history") or case.get("Present medical history")
-        or pc.get("present_medical_history") or pc.get("Present medical history")
+        case.get("present_medical_history")
+        or case.get("Present medical history")
+        or pc.get("present_medical_history")
+        or pc.get("Present medical history")
         or "Not recorded"
     )
+
     age_str = f"{age} ({age_group})" if age_group else str(age)
     return {
         "Age": age_str,
@@ -125,6 +155,13 @@ def format_query_context(case):
     }
 
 
+def clean_text(val):
+    if not isinstance(val, str):
+        return val
+    # Unescape HTML entities like &quot; or &#39;
+    return html.unescape(val).strip()
+
+
 def build_user_prompt(case, max_exemplars=5, correction=False):
     query_ctx = format_query_context(case)
 
@@ -133,9 +170,7 @@ def build_user_prompt(case, max_exemplars=5, correction=False):
 
     oral_check_draft = str(drafts.get("oral_check_draft", "")).strip() or "None"
     diagnosis_draft = str(drafts.get("diagnosis_draft", "")).strip() or "None"
-    treatment_plan_draft = (
-        str(drafts.get("treatment_plan_draft", "")).strip() or "None"
-    )
+    treatment_plan_draft = str(drafts.get("treatment_plan_draft", "")).strip() or "None"
 
     suspected_teeth = (
         ", ".join(findings.get("tooth_notations_expanded", []))
@@ -166,17 +201,19 @@ def build_user_prompt(case, max_exemplars=5, correction=False):
         label = chr(65 + i)
         rec = ex.get("record", {}) or {}
 
+        # Fallback to reranker_score if similarity is missing
+        score = ex.get("similarity") or ex.get("reranker_score") or 0.0
+
         field_lines = []
         for field in TARGET_FIELDS:
-            val = str(rec.get(field, "Not available")).strip()
-            # Truncate overly long exemplar fields to avoid overwhelming the context
+            val = clean_text(str(rec.get(field, "Not available")))
             if len(val) > 300:
                 val = val[:300] + "..."
             field_lines.append(f"  {field}: {val}")
 
         joined_fields = "\n".join(field_lines)
         ex_lines.append(
-            f"[Reference Case {label}] (similarity={ex.get('similarity', 0):.3f})\n{joined_fields}"
+            f"[Reference Case {label}] (similarity={float(score):.3f})\n{joined_fields}"
         )
 
     exemplar_block = (
@@ -212,6 +249,7 @@ def extract_json(raw_text):
 def normalize_tooth_notation(text):
     if not isinstance(text, str):
         return text
+    text = clean_text(text)
     text = re.sub(r"tooth\s*#\s*(\d{1,2})", r"tooth \1", text, flags=re.IGNORECASE)
     text = re.sub(r"#(\d{1,2})\b", r"tooth \1", text)
     return text
@@ -223,9 +261,6 @@ def get_4grams(text):
 
 
 def record_copy_ratio(record, exemplars):
-    """Fraction of the generated record's 4-grams that appear verbatim in ANY
-    single retrieved exemplar. High ratio = parroting one exemplar wholesale
-    rather than describing the current patient. Used to trigger a retry."""
     gen_text = " ".join(str(record.get(f, "")) for f in TARGET_FIELDS)
     gen_ngrams = get_4grams(gen_text)
     if not gen_ngrams:
@@ -279,7 +314,6 @@ def _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens, corre
         {"role": "user", "content": build_user_prompt(case, max_exemplars, correction=correction)},
     ]
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    # print(f"\n\n{prompt_text}\n\n")
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
 
     gen_kwargs = dict(
@@ -299,12 +333,11 @@ def _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens, corre
 
 
 def generate_record(model, tokenizer, case, max_exemplars, max_new_tokens=400, copy_threshold=0.5):
-    """Returns (record_dict, status) where status is one of:
-    'model', 'model_after_retry', 'fallback'."""
     exemplars = case.get("retrieved_exemplars", [])
 
-    raw_text = _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens,
-                               correction=False, sample=False)
+    raw_text = _run_generation(
+        model, tokenizer, case, max_exemplars, max_new_tokens, correction=False, sample=False
+    )
     record = extract_json(raw_text)
     parsed_ok = bool(record) and any(str(record.get(f, "")).strip() for f in TARGET_FIELDS)
 
@@ -312,9 +345,10 @@ def generate_record(model, tokenizer, case, max_exemplars, max_new_tokens=400, c
         record = apply_fallbacks(dict(record), case)
         return record, "model"
 
-    # Retry once: corrective note + sampling, to break out of verbatim copying.
-    raw_text_retry = _run_generation(model, tokenizer, case, max_exemplars, max_new_tokens,
-                                     correction=True, sample=True)
+    # Retry once: corrective note + sampling
+    raw_text_retry = _run_generation(
+        model, tokenizer, case, max_exemplars, max_new_tokens, correction=True, sample=True
+    )
     record_retry = extract_json(raw_text_retry)
     parsed_ok_retry = bool(record_retry) and any(str(record_retry.get(f, "")).strip() for f in TARGET_FIELDS)
 
@@ -322,15 +356,8 @@ def generate_record(model, tokenizer, case, max_exemplars, max_new_tokens=400, c
         record_retry = apply_fallbacks(dict(record_retry), case)
         return record_retry, "model_after_retry"
 
-    # Both attempts failed to produce a grounded, non-copied record.
     fallback_record = apply_fallbacks({}, case)
     return fallback_record, "fallback"
-
-
-def package_zip(predictions_path, zip_path):
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(predictions_path, arcname="predictions.json")
-    print(f"Packaged submission zip: {zip_path}")
 
 
 def main():
@@ -350,6 +377,14 @@ def main():
     print(f"Loading RAG output from {args.rag_json} ...")
     with open(args.rag_json, "r", encoding="utf-8") as f:
         rag_data = json.load(f)
+
+    # Normalize input: support either a top-level list or dict
+    if isinstance(rag_data, list):
+        rag_dict = {}
+        for idx, item in enumerate(rag_data):
+            case_key = str(item.get("case_id", idx))
+            rag_dict[case_key] = item
+        rag_data = rag_dict
 
     case_ids = list(rag_data.keys())
     if args.limit:
@@ -391,13 +426,11 @@ def main():
             f.write(f"{row['Case ID']},{row['generation_status']}\n")
 
     print(f"\nWrote {args.output_json} with {len(predictions)} cases.")
-    print(f"Generation status: {status_counts['model']} model, "
-          f"{status_counts['model_after_retry']} model_after_retry, "
-          f"{status_counts['fallback']} fallback.")
-    print(f"Per-case breakdown saved to {args.status_csv} — check this before trusting "
-          f"any downstream metrics; fallback/retry rows are not genuine model generations.")
-
-    #package_zip(args.output_json, args.output_zip)
+    print(
+        f"Generation status: {status_counts['model']} model, "
+        f"{status_counts['model_after_retry']} model_after_retry, "
+        f"{status_counts['fallback']} fallback."
+    )
 
 
 if __name__ == "__main__":
