@@ -302,7 +302,7 @@ def load_nifti(path, slice_axis):
     return np.transpose(data, order), spacing[order]
 
 
-def compute_facts(mask, spacing, label_map, complaint_teeth, sampled_idx):
+def compute_facts(mask, spacing, label_map, complaint_teeth, sampled_idx, min_voxels=100):
     tooth_label = {f: int(label_map.get("teeth", {}).get(str(f), f)) for f in ALL_FDI}
     structs = {**DEFAULT_STRUCTURES, **label_map.get("structures", {})}
     mask = mask.astype(np.int32)
@@ -312,7 +312,16 @@ def compute_facts(mask, spacing, label_map, complaint_teeth, sampled_idx):
         if label is None or label < 1 or label > len(objs) or objs[label - 1] is None:
             return None
         sl = objs[label - 1]
-        return np.argwhere(mask[sl] == label) + np.array([s.start for s in sl])
+        sub = mask[sl] == label
+        cc, n = ndi.label(sub)
+        if n == 0:
+            return None
+        sizes = np.bincount(cc.ravel(), minlength=n + 1)[1:]
+        keep = np.flatnonzero(sizes >= min_voxels) + 1
+        if keep.size == 0:
+            return None
+        sub = np.isin(cc, keep)
+        return np.argwhere(sub) + np.array([s.start for s in sl])
 
     struct_trees = {}
     for name, lab in structs.items():
@@ -416,11 +425,14 @@ def build_images(vol, mask, facts, sampled_idx, complaint_teeth, label_map, args
         img = render(norm_slice(vol[:, :, k]), mask[:, :, k], args.overview_size)
         images.append((f"Overview axial slice {k} (red outline = segmented teeth):", img))
 
-    # b) up to 3 crops around teeth named in the complaint, cut from the full-resolution nearest sampled slice
+    # b) up to 3 crops around teeth named in the complaint, cut from the full-resolution slice that intersects the tooth
     named = [t for t in sorted(complaint_teeth) if t in facts["teeth"]][:3]
     for fdi in named:
-        ci, cj, ck = facts["teeth"][fdi]["centroid_vox"]
-        k = int(min(sampled_idx, key=lambda s: abs(s - ck)))
+        ft = facts["teeth"][fdi]
+        ci, cj, ck = ft["centroid_vox"]
+        z0, z1 = ft["slice_range"]
+        in_range = [s for s in sampled_idx if z0 <= s <= z1]
+        k = int(min(in_range, key=lambda s: abs(s - ck))) if in_range else int(ck)
         h = args.crop_half
         i0, j0 = int(max(0, min(vol.shape[0] - 2 * h, ci - h))), int(max(0, min(vol.shape[1] - 2 * h, cj - h)))
         g = norm_slice(vol[:, :, k])[i0:i0 + 2 * h, j0:j0 + 2 * h]
@@ -450,10 +462,12 @@ def prepare_case_inputs(case_id, case, args, label_map, slice_index):
 
     mask, spacing = load_nifti(mask_path, args.slice_axis)
     sampled = sampled or []
-    facts = compute_facts(mask, spacing, label_map, complaint_teeth, sampled)
+    facts = compute_facts(mask, spacing, label_map, complaint_teeth, sampled,
+                          args.min_component_voxels)
 
     cached = Path(args.facts_dir) / f"{case_id}.txt" if args.facts_dir else None
-    if cached is not None and cached.exists():
+    if (cached is not None and cached.exists()
+            and cached.stat().st_mtime_ns >= mask_path.stat().st_mtime_ns):
         facts["text"] = cached.read_text(encoding="utf-8")
     elif cached is not None:
         cached.parent.mkdir(parents=True, exist_ok=True)
@@ -719,6 +733,8 @@ def main():
     ap.add_argument("--slice_index_json", default=None,
                     help="{case_id: [20 absolute axial indices]} recorded from the BiomedCLIP slice selection")
     ap.add_argument("--facts_dir", default=None, help="cache dir for facts text files")
+    ap.add_argument("--min_component_voxels", type=int, default=100,
+                    help="ignore mask components smaller than this many voxels")
     ap.add_argument("--label_map", default=None, help="JSON file, see DEFAULT_STRUCTURES comment")
     ap.add_argument("--slice_axis", type=int, default=2, help="axis of the 400-slice dimension in the NIfTI")
     ap.add_argument("--overview_size", type=int, default=896)
